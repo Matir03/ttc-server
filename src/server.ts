@@ -1,10 +1,9 @@
 import { SOCKET_PORT } from './config.js';
 import { Server } from 'socket.io';
-import { AcceptSeek, AddSeek, DeleteSeek, GameAction, GameState, LobbyAction, 
-    MakeMove, MakeSeek, MappedLobbyState, PerformMove, 
-    RemoveSeek, Seek } from './commontypes.js';
-import { TTCServer, TTCSocket } from './servertypes.js';
-import { Game } from './ttc/game.js';
+import { AcceptSeek, AddSeek, DeleteSeek, Action, ChatAction,
+    MakeMove, MakeSeek, MappedLobbyState, PerformMove, EndGame,
+    RemoveSeek, Seek, ChatEvent, ChatMessage } from './commontypes.js';
+import { TTCServer, TTCSocket, GameState } from './servertypes.js';
 
 const io: TTCServer = new Server(SOCKET_PORT, {
     serveClient: false,
@@ -13,7 +12,7 @@ const io: TTCServer = new Server(SOCKET_PORT, {
 
 let maxPID = 0, maxGID = 0;
 const sockets = new Map<string, TTCSocket>();
-const lobby = new MappedLobbyState({seeks: []});
+const lobby = new MappedLobbyState({seeks: [], chat: []});
 const games = new Map<string, GameState>();
 
 console.log(`Server running on port ${SOCKET_PORT}`);
@@ -57,7 +56,7 @@ function updateRoom(socket: TTCSocket, room: string) {
             sent to socket ${socket.id}`);
     } else {
         const state = games.get(room);
-        socket.emit("join_game", state);
+        socket.emit("join_game", state.plain());
         console.log(`Game state ${JSON.stringify(state)}
             sent to socket ${socket.id}`);
     }
@@ -70,7 +69,7 @@ function updateRoom(socket: TTCSocket, room: string) {
 }
 
 function lobbyActionHandler(socket: TTCSocket) {
-    return (action: LobbyAction) => {
+    return (action: Action) => {
 
         console.log(`Receiving lobby action ${JSON.stringify(action)}`);
 
@@ -126,12 +125,10 @@ function newGame(wSocket: TTCSocket, bSocket: TTCSocket) {
     const gid = maxGID++;
     const room = "game" + gid;
     
-    games.set(room, {
-        white: wSocket.data.name,
-        black: bSocket.data.name,
-
-        game: new Game()
-    });
+    games.set(room, new GameState( 
+        wSocket.data.name,
+        bSocket.data.name
+    ));
 
     console.log(`Creating new game ${JSON.stringify(games.get(room))} 
         in room ${room}`);
@@ -154,25 +151,74 @@ function newGame(wSocket: TTCSocket, bSocket: TTCSocket) {
 }
 
 function gameActionHandler(socket: TTCSocket) {
-    return (action: GameAction) => {
+    return (action: Action) => {
         const game = socket.data.room;
+        const pname = socket.data.name;
+        const state = games.get(game);
+
         console.log(`Receiving game action ${JSON.stringify(action)}
-        from ${socket.data.name} in ${game}`);
+        from ${pname} in ${game}`);
         
-        if(action.kind === "MakeMove") {
-            const move = (action as MakeMove).move;
-            const color = 
-                socket.data.name === games.get(game).white ?
-                "white" : "black";
+        const sendMsg = (msg: ChatMessage) => {
+                games.get(game).chat.push(msg);
+                io.to(game).emit("game_event", new ChatEvent(msg));
+        };
 
-            console.log(`Making move ${JSON.stringify(move)} 
-                in ${game}`);
+        const endGame = (result: string) => {
+            sendMsg({
+                sender: "",
+                text: `Game ended in a ${
+                    result === "draw" ? "draw" :
+                    `win for ${result}`
+                }`
+            });
 
-            if(games.get(game).game.makeMove(move))
-                io.to(game).emit("game_event", 
-                    new PerformMove(move, color));
-            else 
-                console.log(`Illegal move in ${game}!`);
+            io.to(game).emit("game_event", new EndGame(result));
+            games.delete(game);
+        };
+
+        switch(action.kind) {
+
+            case "MakeMove":
+
+                const move = (action as MakeMove).move;
+                const color = 
+                    pname === state.white ?
+                    "white" : "black";
+
+                console.log(`Making move ${JSON.stringify(move)} 
+                    in ${game}`);
+
+                if(games.get(game).game.makeMove(move))
+                    io.to(game).emit("game_event", 
+                        new PerformMove(move, color));
+                else 
+                    console.log(`Illegal move in ${game}!`);
+                
+                break;
+
+            case "ChatAction":
+
+                const msg = (action as ChatAction).message;
+                console.log(`Chat message "${msg}" in ${game}`);
+
+                const taggedMsg = {
+                    sender: pname,
+                    text: msg,
+                };
+
+                sendMsg(taggedMsg);
+
+                break;
+
+            case "Resign":
+
+                const winner = pname === state.white ?
+                    "black" : "white";
+
+                console.log(`${pname} resigned in ${game}`);
+
+                endGame(winner);
         }
     };
 }

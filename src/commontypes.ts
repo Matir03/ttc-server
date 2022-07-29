@@ -1,5 +1,4 @@
-import { Color, Move } from './ttc/types.js';
-import { Game } from './ttc/game.js';
+import { Color, Move } from "./ttc/types.js";
 
 export type SeekColor = "White" | "Black" | "Random";
 export const colors: Array<SeekColor> = ["White", "Black", "Random"];
@@ -10,12 +9,21 @@ export interface Seek {
     color: SeekColor;
 }
 
+export interface ChatMessage {
+    sender: string;
+    text: string;
+}
+
+export type Chat = ChatMessage[];
+
 export interface LobbyState {
     seeks: Seek[];
+    chat: Chat;
 }
 
 export class MappedLobbyState {
     seeks: Map<number, Seek>;
+    chat: Chat;
 
     constructor(state: LobbyState) {
         this.seeks = new Map(state.seeks.map(
@@ -34,17 +42,17 @@ export class MappedLobbyState {
     toLobbyState(): LobbyState {
         return {
             seeks: Array.from(this.seeks,
-                ([id, seek]) => seek
-            )
+                ([id, seek]) => seek),
+            chat: this.chat
         }
     }
 }
 
-export interface LobbyAction {
+export interface Action {
     kind: string;
 }
 
-export class MakeSeek implements LobbyAction {
+export class MakeSeek implements Action {
     kind = "MakeSeek";
     color: SeekColor;
 
@@ -53,7 +61,7 @@ export class MakeSeek implements LobbyAction {
     }
 }
 
-export class DeleteSeek implements LobbyAction {
+export class DeleteSeek implements Action {
     kind = "DeleteSeek";
     id: number;
 
@@ -62,7 +70,7 @@ export class DeleteSeek implements LobbyAction {
     }
 }
 
-export class AcceptSeek implements LobbyAction {
+export class AcceptSeek implements Action {
     kind = "AcceptSeek";
     id: number;
     
@@ -71,11 +79,7 @@ export class AcceptSeek implements LobbyAction {
     }
 }
 
-export interface LobbyEvent {
-    kind: string;
-}
-
-export class AddSeek implements LobbyEvent {
+export class AddSeek implements Action {
     kind = "AddSeek";
     seek: Seek; 
 
@@ -84,7 +88,7 @@ export class AddSeek implements LobbyEvent {
     }
 }
 
-export class RemoveSeek implements LobbyEvent {
+export class RemoveSeek implements Action {
     kind = "RemoveSeek";
     id: number;
 
@@ -93,18 +97,15 @@ export class RemoveSeek implements LobbyEvent {
     }
 }
 
-export interface GameState {
+export interface ReceivedGameState {
     white: string;
     black: string;
 
-    game: Game;
+    game: Move[];
+    chat: Chat;
 }
 
-export interface GameAction {
-    kind: string;
-}
-
-export class MakeMove implements GameAction {
+export class MakeMove implements Action {
     kind = "MakeMove";
     move: Move;
 
@@ -113,11 +114,7 @@ export class MakeMove implements GameAction {
     }
 }
 
-export interface GameEvent {
-    kind: string;
-}
-
-export class PerformMove implements GameEvent {
+export class PerformMove implements Action {
     kind = "PerformMove";
     move: Move;
     color: Color;
@@ -128,15 +125,36 @@ export class PerformMove implements GameEvent {
     }
 }
 
+export class ChatAction implements Action {
+    kind = "ChatAction";
+
+    constructor(public message: string) {}
+}
+
+export class ChatEvent implements Action {
+    kind = "ChatEvent";
+
+    constructor(public message: ChatMessage) {}
+}
+
+export class EndGame implements Action {
+    kind = "EndGame";
+    result: string;
+
+    constructor(result: string) {
+        this.result = result;
+    }
+}
+
 export interface ServerToClientEvents {
     join_lobby:  (state: LobbyState) => void;
-    join_game:   (state: GameState)  => void;
-    lobby_event: (event: LobbyEvent) => void;
-    game_event:  (event: GameEvent)  => void;
+    join_game:   (state: ReceivedGameState)  => void;
+    lobby_event: (event: Action) => void;
+    game_event:  (event: Action)  => void;
 }
 
 export interface ClientToServerEvents {
     player_join:  (pname:  string)      => void;
-    lobby_action: (action: LobbyAction) => void;
-    game_action:  (action: GameAction)  => void;
+    lobby_action: (action: Action) => void;
+    game_action:  (action: Action)  => void;
 }
