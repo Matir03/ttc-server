@@ -2,8 +2,8 @@ import { SOCKET_PORT } from './config.js';
 import { Server } from 'socket.io';
 import { AcceptSeek, AddSeek, DeleteSeek, Action, ChatAction,
     MakeMove, MakeSeek, MappedLobbyState, PerformMove, 
-    RemoveSeek, Seek, ChatEvent, ChatMessage, TaggedAction } from './commontypes.js';
-import { TTCServer, TTCSocket, GameState } from './servertypes.js';
+    RemoveSeek, Seek, ChatEvent, ChatMessage, TaggedAction, UpdatePlayer } from './commontypes.js';
+import { TTCServer, TTCSocket, GameState, ServerLobbyState } from './servertypes.js';
 import { opposite } from './ttc/board.js';
 
 const io: TTCServer = new Server(SOCKET_PORT, {
@@ -13,7 +13,12 @@ const io: TTCServer = new Server(SOCKET_PORT, {
 
 let maxPID = 0, maxGID = 0;
 const sockets = new Map<string, TTCSocket>();
-const lobby = new MappedLobbyState({seeks: [], chat: []});
+const lobby = new ServerLobbyState({
+    seeks: [], 
+    games: [],
+    players: [],
+    chat: []
+}, io.to('lobby'));
 const games = new Map<string, GameState>();
 
 console.log(`Server running on port ${SOCKET_PORT}`);
@@ -39,7 +44,6 @@ io.on("connection", (socket) => {
             if(!oldsocket.disconnected) {
                console.log('Existing socket still active');
                
-               socket.emit("name_taken");
                socket.disconnect();
 
                return;
@@ -64,34 +68,61 @@ io.on("connection", (socket) => {
 
         socket.on("lobby_action", lobbyActionHandler(socket));
         socket.on("game_action", gameActionHandler(socket));
+
+        socket.on("disconnect", () => {
+            console.log(`Socket ${socket.id} disconnected`);
+            sockets.delete(pname);
+
+            lobby.updatePlayer({
+                name: pname,
+                status: "offline"
+            });
+
+            if(socket.data.room === "lobby") {
+                lobby.removePlayer(pname);
+            }
+        });
     });
 });
 
 function updateRoom(socket: TTCSocket, room: string) {
+    const pname = socket.data.name;
+
+    if(socket.data.room)
+        socket.leave(socket.data.room);
+
+    socket.data.room = room;
+    socket.join(room);
 
     if(room === "lobby") { 
         const state = lobby.toLobbyState();
         socket.emit("join_lobby", state);
         console.log(`Lobby state ${JSON.stringify(state)} 
             sent to socket ${socket.id}`);
+
+        lobby.updatePlayer({
+            name: pname,
+            status: "online"
+        });
     } else {
         const state = games.get(room);
         socket.emit("join_game", state.plain());
         console.log(`Game state ${JSON.stringify(state)}
             sent to socket ${socket.id}`);
+        
+        lobby.updatePlayer({
+            name: pname,
+            status: "playing"
+        });
     }
-    
-    if(socket.data.room)
-        socket.leave(socket.data.room);
-
-    socket.data.room = room;
-    socket.join(room);
 }
 
 function lobbyActionHandler(socket: TTCSocket) {
     return (action: Action) => {
 
         console.log(`Receiving lobby action ${JSON.stringify(action)}`);
+
+        if(lobby.players.get(socket.data.name).status !== "online") return;
 
         if(action.kind === "MakeSeek") {
 
@@ -103,9 +134,7 @@ function lobbyActionHandler(socket: TTCSocket) {
 
             console.log(`New seek: ${JSON.stringify(seek)}`);
 
-            lobby.insert(seek);
-
-            io.to("lobby").emit("lobby_event", new AddSeek(seek));
+            lobby.insertSeek(seek);
 
         } else if(action.kind === "DeleteSeek") {
 
@@ -113,14 +142,15 @@ function lobbyActionHandler(socket: TTCSocket) {
             
             console.log(`Deleting seek ${id}`);
 
-            lobby.remove(id);
-
-            io.to("lobby").emit("lobby_event", new RemoveSeek(id));
+            lobby.removeSeek(id);
 
         } else if(action.kind === "AcceptSeek") {
 
             const id = (action as AcceptSeek).id;
             const seek = lobby.seeks.get(id);
+
+            if(!seek) return;
+
             const socket2 = sockets.get(seek.player);
 
             console.log(`${socket.data.name} accepted seek 
@@ -134,6 +164,13 @@ function lobbyActionHandler(socket: TTCSocket) {
             } else {
                 newGame(socket2, socket);
             }
+        } else if(action.kind === "ChatAction") {
+            const msg = {
+                sender: socket.data.name,
+                text: (action as ChatAction).message
+            };
+            
+            lobby.updateChat(msg);
         }
 
         console.log(`New lobby state: 
@@ -156,18 +193,20 @@ function newGame(wSocket: TTCSocket, bSocket: TTCSocket) {
     updateRoom(wSocket, room);
     updateRoom(bSocket, room);
 
-    const removals: number[] = [];
+    lobby.removePlayer(wSocket.data.name);
+    lobby.removePlayer(bSocket.data.name);
 
-    lobby.seeks.forEach(seek => {
-        if([wSocket.data.name, bSocket.data.name]
-            .includes(seek.player)) {        
-            removals.push(seek.id);
-            io.to("lobby").emit("lobby_event", 
-                new RemoveSeek(seek.id));
-        }
-    })
+    lobby.updateGame({
+        id: gid,
+        white: wSocket.data.name,
+        black: bSocket.data.name,
+        status: "playing"
+    });
 
-    removals.forEach(id => lobby.remove(id));
+    lobby.updateChat({
+        sender: '',
+        text: `${wSocket.data.name} and ${bSocket.data.name} are playing`
+    });
 }
 
 function gameActionHandler(socket: TTCSocket) {
@@ -196,6 +235,23 @@ function gameActionHandler(socket: TTCSocket) {
 
             io.to(game).emit("game_event", {kind: "GameEnd"});
             
+            lobby.updateGame({
+                id: parseInt(game.slice(4)),
+                white: state.white,
+                black: state.black,
+                status: result === "draw" ? "draw" :
+                    `${result} won`
+            });
+
+            lobby.updateChat({
+                sender: '',
+                text: result === "draw" ? 
+                    `${state.white} and ${state.black} drew` : 
+                    result === "white" ?
+                        `${state.white} won against ${state.black}` :
+                        `${state.black} won against ${state.white}`
+            });
+
             state.ended = true;
         };
 

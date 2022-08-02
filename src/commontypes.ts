@@ -16,33 +16,75 @@ export interface ChatMessage {
 
 export type Chat = ChatMessage[];
 
+export interface LobbyGame {
+    id: number;
+    white: string;
+    black: string;
+    status: string;
+}
+
+export interface LobbyPlayer {
+    name: string;
+    status: string;
+}
+
 export interface LobbyState {
     seeks: Seek[];
+    games: LobbyGame[];
     chat: Chat;
+    players: LobbyPlayer[]; 
 }
 
 export class MappedLobbyState {
     seeks: Map<number, Seek>;
+    games: Map<number, LobbyGame>;
+    players: Map<string, LobbyPlayer>;
     chat: Chat;
 
     constructor(state: LobbyState) {
         this.seeks = new Map(state.seeks.map(
             seek => [seek.id, seek]
         ));
+
+        this.games = new Map(state.games.map(
+            game => [game.id, game]
+        ));
+
+        this.players = new Map(state.players.map(
+            player => [player.name, player]
+        ));
+
+        this.chat = state.chat;
     }
 
-    insert(seek: Seek) {
+    insertSeek(seek: Seek) {
         this.seeks.set(seek.id, seek);
     }
 
-    remove(id: number) {
+    removeSeek(id: number) {
         this.seeks.delete(id);
+    }
+
+    updateGame(game: LobbyGame) {
+        this.games.set(game.id, game);
+    }
+
+    updatePlayer(player: LobbyPlayer) {
+        this.players.set(player.name, player);
+    }
+
+    updateChat(msg: ChatMessage) {
+        this.chat.push(msg);
     }
 
     toLobbyState(): LobbyState {
         return {
             seeks: Array.from(this.seeks,
                 ([id, seek]) => seek),
+            games: Array.from(this.games,
+                ([id, game]) => game),
+            players: Array.from(this.players,
+                ([name, player]) => player),
             chat: this.chat
         }
     }
@@ -90,6 +132,33 @@ export class AddSeek implements Action {
 
 export class RemoveSeek implements Action {
     kind = "RemoveSeek";
+    id: number;
+
+    constructor(id: number) {
+        this.id = id;
+    }
+}
+
+export class UpdateGame implements Action {
+    kind = "UpdateGame";
+    game: LobbyGame;
+
+    constructor(game: LobbyGame) {
+        this.game = game;
+    }
+}
+
+export class UpdatePlayer implements Action {
+    kind = "UpdatePlayer";
+    player: LobbyPlayer;
+
+    constructor(player: LobbyPlayer) {
+        this.player = player;
+    }
+}
+
+export class WatchGame implements Action {
+    kind = "WatchGame";
     id: number;
 
     constructor(id: number) {
@@ -145,7 +214,6 @@ export interface TaggedAction extends Action {
 }
 
 export interface ServerToClientEvents {
-    name_taken: () => void;
     join_lobby:  (state: LobbyState) => void;
     join_game:   (state: ReceivedGameState)  => void;
     lobby_event: (event: Action) => void;
@@ -153,7 +221,7 @@ export interface ServerToClientEvents {
 }
 
 export interface ClientToServerEvents {
-    player_join:  (pname:  string) => void;
+    player_join:  (pname:  string)      => void;
     lobby_action: (action: Action) => void;
     game_action:  (action: Action)  => void;
 }
