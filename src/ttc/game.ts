@@ -9,9 +9,11 @@ export class Game {
     ply: number;
     fens: string[];
     moves: ttc.Move[];
+    moves_plain: string[];
 
     constructor(moves: ttc.Move[] = []) {
         this.moves = [];
+        this.moves_plain = [];
         this.fens = [startingFEN];
         this.board = Board.fromFEN(startingFEN);
         this.ply = 0;
@@ -22,7 +24,8 @@ export class Game {
     makeMove(move: ttc.Move): boolean {
         if(!this.board.isLegal(move)) 
             return false;
-        
+
+        this.moves_plain.push(this.board.moveToString(move));
         this.board.makeMove(move);
 
         this.moves.splice(this.ply);
@@ -38,6 +41,18 @@ export class Game {
     gotoPly(newPly: number) {
         this.board = Board.fromFEN(this.fens[newPly]);
         this.ply = newPly;
+    }
+
+    canClaimDraw() {
+        const trimFEN = (fen: string) => 
+            fen.split(" ").slice(0, 4).join(" ");
+        const curFEN = trimFEN(this.fens[this.ply]);
+
+        return parseInt(this.fens[this.ply]
+            .split(' ').at(-2)) >= 100 ||
+            this.fens.filter(fen => 
+                trimFEN(fen) === curFEN).length >= 3 ||
+            this.board.canClaimDraw();     
     }
 
     toJSON() {

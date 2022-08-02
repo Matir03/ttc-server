@@ -22,6 +22,9 @@ export class GameState {
     black: string;
     game: Game;
     chat: Chat;
+    drawOffer: string;
+    ended: boolean;
+    rematch: string;
 
     constructor(white: string, black: string) {
         this.white = white;
@@ -31,6 +34,9 @@ export class GameState {
             sender: "",
             text: `New game started between ${white} and ${black}`
         }];
+        this.drawOffer = "";
+        this.ended = false;
+        this.rematch = "";
     }
     
     plain(): ReceivedGameState {
@@ -38,7 +44,8 @@ export class GameState {
             white: this.white,
             black: this.black,
             game: this.game.moves,
-            chat: this.chat
+            chat: this.chat,
+            drawOffer: this.drawOffer
         };
     }
 }

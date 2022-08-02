@@ -103,6 +103,8 @@ export interface ReceivedGameState {
 
     game: Move[];
     chat: Chat;
+
+    drawOffer: string;
 }
 
 export class MakeMove implements Action {
@@ -137,16 +139,13 @@ export class ChatEvent implements Action {
     constructor(public message: ChatMessage) {}
 }
 
-export class EndGame implements Action {
-    kind = "EndGame";
-    result: string;
-
-    constructor(result: string) {
-        this.result = result;
-    }
+export interface TaggedAction extends Action {
+    kind: string;
+    player: string;
 }
 
 export interface ServerToClientEvents {
+    name_taken: () => void;
     join_lobby:  (state: LobbyState) => void;
     join_game:   (state: ReceivedGameState)  => void;
     lobby_event: (event: Action) => void;
@@ -154,7 +153,7 @@ export interface ServerToClientEvents {
 }
 
 export interface ClientToServerEvents {
-    player_join:  (pname:  string)      => void;
+    player_join:  (pname:  string) => void;
     lobby_action: (action: Action) => void;
     game_action:  (action: Action)  => void;
 }

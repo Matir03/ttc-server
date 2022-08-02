@@ -1,9 +1,10 @@
 import { SOCKET_PORT } from './config.js';
 import { Server } from 'socket.io';
 import { AcceptSeek, AddSeek, DeleteSeek, Action, ChatAction,
-    MakeMove, MakeSeek, MappedLobbyState, PerformMove, EndGame,
-    RemoveSeek, Seek, ChatEvent, ChatMessage } from './commontypes.js';
+    MakeMove, MakeSeek, MappedLobbyState, PerformMove, 
+    RemoveSeek, Seek, ChatEvent, ChatMessage, TaggedAction } from './commontypes.js';
 import { TTCServer, TTCSocket, GameState } from './servertypes.js';
+import { opposite } from './ttc/board.js';
 
 const io: TTCServer = new Server(SOCKET_PORT, {
     serveClient: false,
@@ -21,17 +22,36 @@ io.on("connection", (socket) => {
     console.log(`Socket ${socket.id} connected`);
 
     socket.on("player_join", (pname) => {
+        if(!pname) {
+            console.log(`Socket ${socket.id} sent invalid name`);
+            socket.disconnect();
+            return;
+        }
+
         socket.data.name = pname
         console.log(`Socket ${socket.id} has name ${socket.data.name}`);
 
         if(sockets.has(pname)) {
             const oldsocket = sockets.get(pname);
             
-            console.log(`Old socket ${oldsocket.id} with same name`);
+            console.log(`Existing socket ${oldsocket.id} with same name`);
+            
+            if(!oldsocket.disconnected) {
+               console.log('Existing socket still active');
+               
+               socket.emit("name_taken");
+               socket.disconnect();
+
+               return;
+            }
+
+            let room = oldsocket.data.room;
+            if(!room) room = "lobby";
+
             console.log(`Sending socket ${socket.id} 
                 to room ${oldsocket.data.room}`);
 
-            updateRoom(socket, oldsocket.data.room);
+            updateRoom(socket, room);
             
             oldsocket.disconnect();
             console.log(`Socket ${oldsocket.id} disconnected`);
@@ -154,13 +174,14 @@ function gameActionHandler(socket: TTCSocket) {
     return (action: Action) => {
         const game = socket.data.room;
         const pname = socket.data.name;
-        const state = games.get(game);
 
         console.log(`Receiving game action ${JSON.stringify(action)}
         from ${pname} in ${game}`);
+
+        const state = games.get(game);
         
         const sendMsg = (msg: ChatMessage) => {
-                games.get(game).chat.push(msg);
+                state.chat.push(msg);
                 io.to(game).emit("game_event", new ChatEvent(msg));
         };
 
@@ -173,25 +194,40 @@ function gameActionHandler(socket: TTCSocket) {
                 }`
             });
 
-            io.to(game).emit("game_event", new EndGame(result));
-            games.delete(game);
+            io.to(game).emit("game_event", {kind: "GameEnd"});
+            
+            state.ended = true;
         };
 
+        const color = pname === state.white ?
+            "white" : "black";
+            
         switch(action.kind) {
 
             case "MakeMove":
 
-                const move = (action as MakeMove).move;
-                const color = 
-                    pname === state.white ?
-                    "white" : "black";
+                if(state.ended) return;
 
+                const move = (action as MakeMove).move;
+                
                 console.log(`Making move ${JSON.stringify(move)} 
                     in ${game}`);
 
-                if(games.get(game).game.makeMove(move))
+                if(state.game.makeMove(move)) {
                     io.to(game).emit("game_event", 
                         new PerformMove(move, color));
+                    
+                    const result = state.game.board.result();
+
+                    if(result !== "none") {
+                        console.log(`Game ended normally in ${game}`);
+                        endGame(result);
+                        return;
+                    }
+
+                    if(state.drawOffer === opposite(color))
+                        state.drawOffer = "";
+                }
                 else 
                     console.log(`Illegal move in ${game}!`);
                 
@@ -213,12 +249,154 @@ function gameActionHandler(socket: TTCSocket) {
 
             case "Resign":
 
+                if(state.ended) return;
+
                 const winner = pname === state.white ?
                     "black" : "white";
 
                 console.log(`${pname} resigned in ${game}`);
+                sendMsg({
+                    sender: '',
+                    text: `${pname} resigned`
+                })
 
                 endGame(winner);
+            
+                break;
+
+            case "Offer Draw":
+
+                if(state.ended) return;
+
+                console.log(`${pname} offered draw in ${game}`);
+
+                if(state.drawOffer) {
+                    if(state.drawOffer === pname) return;
+
+                    sendMsg({
+                        sender: '',
+                        text: "Players agreed to a draw"
+                    });
+
+                    endGame("draw");
+                    return;
+                }
+                
+                state.drawOffer = pname;
+
+                sendMsg({
+                    sender: '', 
+                    text: `${pname} offered a draw`
+                });
+
+                io.to(game).emit("game_event", {
+                    kind: "DrawOffered",
+                    player: pname
+                } as TaggedAction);
+
+                break;
+            
+            case "Accept Draw":
+
+                if(state.ended) return;
+
+                if(!state.drawOffer ||
+                    state.drawOffer === pname) return;
+
+                console.log(`${pname} accepted draw in ${game}`);
+                sendMsg({
+                    sender: '',
+                    text: `${pname} accepted a draw`
+                });
+
+                endGame("draw");
+
+                break;
+            
+            case "Decline Draw":
+
+                if(state.ended) return;
+
+                if(!state.drawOffer ||
+                    state.drawOffer === pname) return;
+
+                console.log(`${pname} declined draw in ${game}`);
+
+                sendMsg({
+                    sender: '',
+                    text: `${pname} declined a draw`
+                });
+
+                state.drawOffer = "";
+
+                break;
+
+            case "Claim Draw":
+
+                if(state.ended) return;
+
+                if(!state.game.canClaimDraw()) return;
+
+                console.log(`${pname} claimed draw in ${game}`);
+
+                sendMsg({
+                    sender: '',
+                    text: `${pname} claimed a draw`
+                });
+
+                endGame("draw");
+
+                break;
+
+            case "Exit Game":
+
+                if(!state.ended) return;
+
+                console.log(`${pname} exited game ${game}`);
+                
+                state.rematch = "never";
+
+                sendMsg({
+                    sender: '',
+                    text: `${pname} left the game`
+                });
+
+                updateRoom(socket, "lobby");
+                break;
+                
+            case "Rematch":
+
+                if(!state.ended) return;
+
+                console.log(`${pname} requested rematch in ${game}`);
+
+                if(state.rematch) {
+                    if(state.rematch === pname ||
+                        state.rematch === "never") return;
+
+                    sendMsg({
+                        sender: '',
+                        text: "Players agreed to a rematch"
+                    });                    
+
+                    state.rematch = "";
+
+                    newGame(sockets.get(state.black), sockets.get(state.white));
+
+                    return;
+                }
+
+                state.rematch = pname;
+
+                sendMsg({
+                    sender: '',
+                    text: `${pname} wants a rematch`
+                })
+
+                break;
+
+            default:
+                console.log(`Unknown game action type: ${action.kind}`);
         }
     };
 }

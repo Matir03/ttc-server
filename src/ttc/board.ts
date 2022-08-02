@@ -16,14 +16,6 @@ export function sameColor(key1: ttc.Key, key2: ttc.Key): boolean {
     return (key1[0] + key2[0] + key1[1] + key2[1]) % 2 === 0;
 }
 
-function incrementBlinks(blinks: ttc.Blinks, piece: ttc.Piece) {
-    const pname = pieceToChar(piece); 
-
-    const k = blinks.get(pname) ?? 0;
-
-    blinks.set(pname, k + 1);       
-}
-
 function pieceToChar(piece: ttc.Piece): string {
     return String.fromCharCode(
         ttc.role2sym[piece.role].charCodeAt(0) + 
@@ -55,6 +47,7 @@ export function toCoord(key: ttc.Key): string {
 export class Board {
     
     squares: Map<string, ttc.Square>;
+    blinks: Map<string, Map<string, number>>;
     turn: ttc.Color;
     castling: ttc.Castling;
     enpassant: number;
@@ -68,6 +61,10 @@ export class Board {
         const records = fen.split(' ');
 
         board.squares = new Map();
+        board.blinks = new Map(ttc.syms.flatMap(s => [
+            [s, new Map()], 
+            [s.toLowerCase(), new Map()]
+        ]));
 
         for(let x = 1; x <= 8; x++) 
             for(let y = 1; y <= 8; y++) 
@@ -95,7 +92,7 @@ export class Board {
                     piece.tapped =
                         tapped.length === 3 ? 
                         {
-                            role: ttc.sym2role[tapped[0]],
+                            role: ttc.sym2role[tapped.charAt(0).toUpperCase()],
                             target: toKey(tapped.slice(1))
                         } :
                         {
@@ -130,8 +127,7 @@ export class Board {
                     const piece = charToPiece(c);
 
                     if(blink) {
-                        incrementBlinks(board.squares.get(toCoord([x, y])).blinks,
-                            piece)
+                        board.blink([x, y], piece);
                     } else {
                         x += 1;
                         board.squares.get(toCoord([x, y])).piece = piece;
@@ -206,7 +202,8 @@ export class Board {
                             square.blinks.get(c)))
                         .join('');
 
-                    if(blinkstr) entry += `[${blinkstr}]`;
+                    if(blinkstr) 
+                        entry = `${entry ? entry : '1'}[${blinkstr}]`;
 
                     if(entry) {
                         if(nulls) rank += String.fromCharCode(nulls + 
@@ -258,6 +255,9 @@ export class Board {
                 })
             }
         }
+
+        board.blinks = new Map([...this.blinks].map(
+            ([s, m]) => [s, new Map(m)]));
 
         board.castling = {
             short: {...this.castling.short},
@@ -568,10 +568,7 @@ export class Board {
                     this.halfmoves++;
                 }
             } else {
-                const k = this.squares.get(toCoord(move.orig))
-                    .blinks.get(targetName);
-                this.squares.get(toCoord(move.orig))
-                    .blinks.set(targetName, k - 1);
+                this.unblink(move.orig, basicTarget);
 
                 this.squares.get(toCoord(move.orig)).piece = basicTarget;
             }
@@ -589,8 +586,7 @@ export class Board {
 
             if(piece.tapped) return;      
 
-            incrementBlinks(this.squares.get(toCoord(key)).blinks,
-                {role: piece.role, color: piece.color});
+            this.blink(key, {role: piece.role, color: piece.color});
             
             if(key === [8, r]) 
                 this.castling.short[this.turn] = false;
@@ -722,6 +718,21 @@ export class Board {
             this.legalTaps(toKey(coord), blinks).length)
     }
 
+    hasLegalUnblinks(blinks: ttc.Key[]): boolean {
+        return [...this.squares].some(([coord, sq]) => {
+            const roles = [...sq.blinks].filter(([p, n]) => 
+                    n > 0 && charToPiece(p).color === this.turn);
+
+            if(roles.length === 0) return false;
+
+            return this.isLegal({
+                orig: toKey(coord),
+                target: roles[0][0] as ttc.Role,
+                blinks
+            });
+        })
+    }
+
     hasLegalMoves(blinks: ttc.Key[]): boolean {
         const taps = [...this.squares]
             .filter(([_, sq]) => sq.piece?.tapped &&
@@ -739,6 +750,7 @@ export class Board {
 
         return this.hasLegalPlays(comBlinks) ||
             this.hasLegalTaps(comBlinks) ||
+            this.hasLegalUnblinks(comBlinks) ||
             wrongs.some(([coord, sq]) => 
                 this.isLegal({
                     orig: toKey(coord),
@@ -757,26 +769,136 @@ export class Board {
             this.hasLegalMoves(blinks.concat([orig]));
     }
 
-    /*
-    inCheck(): boolean {
+    inCheck(color: ttc.Color): boolean {
         const dream = this.copy();
 
-        dream.turn = opposite(this.turn);
+        dream.turn = opposite(color);
 
-        return ![...dream.squares]
+        return [...dream.squares]
             .filter(([_, square]) => square.piece?.color === dream.turn)
             .flatMap(([coord, _]) => dream.basicDests(toKey(coord)))
-            .some(dest => (piece => piece?.tapped || 
-                    (piece?.role === 'king' && dream.isResolved(dream.turn))
-                )(dream.squares.get(toCoord(dest)).piece));
+            .some(dest => dream.squares.get(toCoord(dest))
+                .piece?.role === 'king');
     }
-    */
+
+    canClaimDraw(): boolean {
+        return [...this.squares].some(([_, square]) => 
+                square.piece?.color === this.turn &&
+                square.piece?.role === 'king') &&
+            !this.inCheck(this.turn) &&
+            [...this.squares]
+            .filter(([_, square]) => square.piece?.color === this.turn)
+            .every(([coord, sq]) => this.basicDests(toKey(coord))
+                .every(dest => {
+                    const dream = this.copy();
+                    
+                    dream.makeMove({
+                        orig: toKey(coord), 
+                        dest: dest,
+                        target: (sq.piece.role === 'pawn' &&
+                            dest[1] === (this.turn === 'white' ? 8 : 1))
+                            ? 'queen' : undefined,
+                        blinks: []
+                    }) 
+
+                    return dream.inCheck(this.turn);
+                }))
+    }
 
     result(): ttc.Color | 'draw' | 'none' {
         if(this.hasLegalMoves([])) return 'none';
 
-        if(!this.isResolved) return opposite(this.turn);
-
-        return 'draw';
+        if(this.canClaimDraw()) return 'draw';
+        return opposite(this.turn);
     }
+
+    blink(key: ttc.Key, piece: ttc.Piece) {
+        const pname = pieceToChar(piece); 
+        const sqname = toCoord(key);
+
+        const blinks = this.squares.get(sqname).blinks;
+    
+        const ksq = blinks.get(pname) ?? 0;    
+        blinks.set(pname, ksq + 1);       
+
+        this.blinks.get(pname).set(sqname, ksq + 1);
+    }
+
+    unblink(key: ttc.Key, piece: ttc.Piece) {
+        const pname = pieceToChar(piece); 
+        const sqname = toCoord(key);
+
+        const blinks = this.squares.get(sqname).blinks;
+        const ksq = blinks.get(pname);
+
+        blinks.set(pname, ksq - 1);       
+
+        this.blinks.get(pname).set(sqname, ksq - 1);
+    }
+
+    moveToString(move: ttc.Move): string {
+        const roleToLetter = (role: ttc.Role) => {
+            const letter = ttc.role2sym[role];
+            return letter === 'P' ? '' : letter;
+        }
+
+        const mainmove = (() => {
+            const orig = toCoord(move.orig);
+        
+            if(!move.dest) {
+                return `${roleToLetter(move.target)}@${orig}`;
+            }
+
+            const dest = toCoord(move.dest);
+
+            const piece = this.squares.get(orig)?.piece;
+
+            if(!piece) {        
+                const piece = this.squares.get(dest)?.piece;
+
+                const pieceLetter = roleToLetter(piece?.role);
+
+                const promo = pieceLetter === '' && move.target && move.target !== 'pawn' ? 
+                    '=' + roleToLetter(move.target) : '';
+
+                return `${pieceLetter}${dest}@${orig}${promo}`;
+            }
+
+            const pieceLetter = roleToLetter(piece.role);
+
+            if(pieceLetter === 'K' && orig[0] === 'e') {
+                if(dest[0] === 'g') return 'O-O';
+                if(dest[0] === 'c') return 'O-O-O';
+            }
+
+            const imposters = [...this.squares].filter(([coord, sq]) =>
+                coord !== orig && sq.piece &&
+                pieceToChar(sq.piece) === pieceToChar(piece) &&
+                this.isLegal({
+                    orig: toKey(coord), 
+                    dest: move.dest,
+                    target: move.target,
+                    blinks: move.blinks
+                }));
+
+            const capture = this.squares.get(dest)?.piece || 
+                (pieceLetter === '' && orig[0] !== dest[0]) ? 'x' : '';
+
+            const disambig = imposters.length || (capture && !pieceLetter) ?
+                (imposters.some(([coord, _]) => coord[0] === orig[0]) ?
+                (imposters.some(([coord, _]) => coord[1] === orig[1]) ?
+                    `${orig[0]}${orig[1]}` :
+                    `${orig[1]}`) :
+                    `${orig[0]}`) : '';
+
+            const promo = move.target ? '=' + roleToLetter(move.target) : ''; 
+
+            return `${pieceLetter}${disambig}${capture}${dest}${promo}`;
+        })();
+
+        const blinks = move.blinks.map(key => toCoord(key)).join(',');
+        const blinkmove = blinks ? `*${blinks}` : '';
+
+        return `${mainmove}${blinkmove}`;
+   }
 }
