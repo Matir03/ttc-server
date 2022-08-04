@@ -1,10 +1,12 @@
 import { SOCKET_PORT } from './config.js';
 import { Server } from 'socket.io';
 import { AcceptSeek, AddSeek, DeleteSeek, Action, ChatAction,
-    MakeMove, MakeSeek, MappedLobbyState, PerformMove, 
-    RemoveSeek, Seek, ChatEvent, ChatMessage, TaggedAction, UpdatePlayer } from './commontypes.js';
+    MakeMove, MakeSeek, MappedLobbyState, PerformMove, WatchPlayer,
+    RemoveSeek, Seek, ChatEvent, ChatMessage, TaggedAction, 
+    WatchGame, UpdatePlayer, ClockInfo } from './commontypes.js';
 import { TTCServer, TTCSocket, GameState, ServerLobbyState } from './servertypes.js';
 import { opposite } from './ttc/board.js';
+import { Color } from './ttc/types.js';
 
 const io: TTCServer = new Server(SOCKET_PORT, {
     serveClient: false,
@@ -18,7 +20,7 @@ const lobby = new ServerLobbyState({
     games: [],
     players: [],
     chat: []
-}, io.to('lobby'));
+}, io);
 const games = new Map<string, GameState>();
 
 console.log(`Server running on port ${SOCKET_PORT}`);
@@ -71,7 +73,6 @@ io.on("connection", (socket) => {
 
         socket.on("disconnect", () => {
             console.log(`Socket ${socket.id} disconnected`);
-            sockets.delete(pname);
 
             lobby.updatePlayer({
                 name: pname,
@@ -86,6 +87,7 @@ io.on("connection", (socket) => {
 });
 
 function updateRoom(socket: TTCSocket, room: string) {
+    if(socket.data.room === room) return;
     const pname = socket.data.name;
 
     if(socket.data.room)
@@ -95,7 +97,7 @@ function updateRoom(socket: TTCSocket, room: string) {
     socket.join(room);
 
     if(room === "lobby") { 
-        const state = lobby.toLobbyState();
+        const state = lobby.toLobbyState(socket.data.name);
         socket.emit("join_lobby", state);
         console.log(`Lobby state ${JSON.stringify(state)} 
             sent to socket ${socket.id}`);
@@ -106,14 +108,24 @@ function updateRoom(socket: TTCSocket, room: string) {
         });
     } else {
         const state = games.get(room);
-        socket.emit("join_game", state.plain());
+        
+        if(state.white === pname || 
+            state.black === pname) {
+            socket.emit("join_game", state.plain());
+            lobby.updatePlayer({
+                name: pname,
+                status: "playing"
+            });
+        } else {
+            socket.emit("join_game", state.specPlain());
+            lobby.updatePlayer({
+                name: pname,
+                status: "spectating"
+            });
+        }
+
         console.log(`Game state ${JSON.stringify(state)}
             sent to socket ${socket.id}`);
-        
-        lobby.updatePlayer({
-            name: pname,
-            status: "playing"
-        });
     }
 }
 
@@ -126,15 +138,23 @@ function lobbyActionHandler(socket: TTCSocket) {
 
         if(action.kind === "MakeSeek") {
 
+            const data = action as MakeSeek;
+
             const seek: Seek = {
                 id: maxPID++,
                 player: socket.data.name,
-                color: (action as MakeSeek).color
+                opponent: data.opponent,
+                color: data.color,
+                timeWhite: data.timeWhite,
+                timeBlack: data.timeBlack,
             };
 
             console.log(`New seek: ${JSON.stringify(seek)}`);
 
-            lobby.insertSeek(seek);
+            lobby.insertSeek(seek, seek.opponent ? [
+                socket.id,
+                sockets.get(seek.opponent)?.id
+            ] : null);
 
         } else if(action.kind === "DeleteSeek") {
 
@@ -159,10 +179,20 @@ function lobbyActionHandler(socket: TTCSocket) {
             const white = (seek.color === "Black") ||
                 (seek.color === "Random" && Math.random() < 0.5);
             
+            const clockInfo ={
+                white: seek.timeWhite,
+                black: seek.timeBlack,
+                timeleft: [
+                    seek.timeWhite?.base,
+                    seek.timeBlack?.base
+                ],
+                timestamp: Date.now()
+            }
+            
             if(white) {
-                newGame(socket, socket2);
+                newGame(socket, socket2, clockInfo);
             } else {
-                newGame(socket2, socket);
+                newGame(socket2, socket, clockInfo);
             }
         } else if(action.kind === "ChatAction") {
             const msg = {
@@ -171,6 +201,14 @@ function lobbyActionHandler(socket: TTCSocket) {
             };
             
             lobby.updateChat(msg);
+        } else if(action.kind === "WatchGame") {
+            const id = (action as WatchGame).id;
+            const room = `game${id}`;
+            if(!games.has(room)) return;
+            updateRoom(socket, room);
+        } else if(action.kind === "WatchPlayer") {
+            const name = (action as WatchPlayer).name;
+            updateRoom(socket, sockets.get(name)?.data.room || "lobby");
         }
 
         console.log(`New lobby state: 
@@ -178,14 +216,16 @@ function lobbyActionHandler(socket: TTCSocket) {
     };
 }
 
-function newGame(wSocket: TTCSocket, bSocket: TTCSocket) {
+function newGame(wSocket: TTCSocket, bSocket: TTCSocket, clockInfo: ClockInfo) {
     const gid = maxGID++;
     const room = "game" + gid;
-    
-    games.set(room, new GameState( 
+
+    const state = new GameState( 
         wSocket.data.name,
-        bSocket.data.name
-    ));
+        bSocket.data.name,
+        clockInfo
+    );
+    games.set(room, state);
 
     console.log(`Creating new game ${JSON.stringify(games.get(room))} 
         in room ${room}`);
@@ -207,24 +247,78 @@ function newGame(wSocket: TTCSocket, bSocket: TTCSocket) {
         sender: '',
         text: `${wSocket.data.name} and ${bSocket.data.name} are playing`
     });
+
+    if(clockInfo.white) {
+        state.ticker = setTimeout(timeout, 
+            clockInfo.white.base, room, "white");
+    }
+}
+
+function timeout(room: string, color: Color) {
+    const state = games.get(room);
+
+    console.log(`${color} timed out in ${room}`);
+
+    const msg1 = {
+        sender: '',
+        text: `${state[color]} has timed out`
+    };
+
+    const winner = opposite(color);
+
+    const msg2 = {
+        sender: '',
+        text: `Game ended in a win for ${winner}`
+    };
+
+    const sendMsg = (msg: ChatMessage) => {
+        state.chat.push(msg);
+        state.specChat.push(msg);
+        io.to(room).emit("game_event", new ChatEvent(msg));
+    };
+
+    sendMsg(msg1);
+    sendMsg(msg2);
+
+    io.to(room).emit("game_event", {kind: "GameEnd"});
+            
+    lobby.updateGame({
+        id: parseInt(room.slice(4)),
+        white: state.white,
+        black: state.black,
+        status: `${winner} won`
+    });
+
+    lobby.updateChat({
+        sender: '',
+        text: winner === "white" ?
+            `${state.white} won against ${state.black}` :
+            `${state.black} won against ${state.white}`
+    });
+
+    state.ended = true;
+    state.ticker = null;
 }
 
 function gameActionHandler(socket: TTCSocket) {
     return (action: Action) => {
-        const game = socket.data.room;
+        const room = socket.data.room;
         const pname = socket.data.name;
 
         console.log(`Receiving game action ${JSON.stringify(action)}
-        from ${pname} in ${game}`);
+        from ${pname} in ${room}`);
 
-        const state = games.get(game);
+        const state = games.get(room);
         
         const sendMsg = (msg: ChatMessage) => {
                 state.chat.push(msg);
-                io.to(game).emit("game_event", new ChatEvent(msg));
+                state.specChat.push(msg);
+                io.to(room).emit("game_event", new ChatEvent(msg));
         };
 
         const endGame = (result: string) => {
+            clearTimeout(state.ticker);
+        
             sendMsg({
                 sender: "",
                 text: `Game ended in a ${
@@ -233,10 +327,10 @@ function gameActionHandler(socket: TTCSocket) {
                 }`
             });
 
-            io.to(game).emit("game_event", {kind: "GameEnd"});
+            io.to(room).emit("game_event", {kind: "GameEnd"});
             
             lobby.updateGame({
-                id: parseInt(game.slice(4)),
+                id: parseInt(room.slice(4)),
                 white: state.white,
                 black: state.black,
                 status: result === "draw" ? "draw" :
@@ -253,7 +347,29 @@ function gameActionHandler(socket: TTCSocket) {
             });
 
             state.ended = true;
+            state.ticker = null;
         };
+
+        if(pname !== state.white && pname !== state.black) {
+            switch(action.kind) {
+                case "Leave Game":
+                    updateRoom(socket, "lobby");
+                    break;
+                
+                case "ChatAction":
+                    const msg = {
+                        sender: pname,
+                        text: (action as ChatAction).message
+                    };
+                    state.specChat.push(msg);
+                    io.to(room).except([
+                        sockets.get(state.white)?.id,
+                        sockets.get(state.black)?.id
+                    ]).emit("game_event", new ChatEvent(msg));
+            }
+
+            return;
+        }
 
         const color = pname === state.white ?
             "white" : "black";
@@ -267,16 +383,33 @@ function gameActionHandler(socket: TTCSocket) {
                 const move = (action as MakeMove).move;
                 
                 console.log(`Making move ${JSON.stringify(move)} 
-                    in ${game}`);
+                    in ${room}`);
 
                 if(state.game.makeMove(move)) {
-                    io.to(game).emit("game_event", 
-                        new PerformMove(move, color));
+                    const now = Date.now();
+
+                    if(state.ticker) {
+                        clearTimeout(state.ticker);
+
+                        state.clockInfo.timeleft.push(
+                            state.clockInfo.timeleft.at(-2) +
+                            state.clockInfo[color].incr -
+                            (now - state.clockInfo.timestamp));
+                        
+                        state.clockInfo.timestamp = now;
+
+                        state.ticker = setTimeout(timeout,
+                            state.clockInfo.timeleft.at(-2), room, 
+                            opposite(color));
+                    }
+
+                    io.to(room).emit("game_event", new PerformMove(
+                        move, color, now));
                     
                     const result = state.game.board.result();
 
                     if(result !== "none") {
-                        console.log(`Game ended normally in ${game}`);
+                        console.log(`Game ended normally in ${room}`);
                         endGame(result);
                         return;
                     }
@@ -285,14 +418,14 @@ function gameActionHandler(socket: TTCSocket) {
                         state.drawOffer = "";
                 }
                 else 
-                    console.log(`Illegal move in ${game}!`);
+                    console.log(`Illegal move in ${room}!`);
                 
                 break;
 
             case "ChatAction":
 
                 const msg = (action as ChatAction).message;
-                console.log(`Chat message "${msg}" in ${game}`);
+                console.log(`Chat message "${msg}" in ${room}`);
 
                 const taggedMsg = {
                     sender: pname,
@@ -310,7 +443,7 @@ function gameActionHandler(socket: TTCSocket) {
                 const winner = pname === state.white ?
                     "black" : "white";
 
-                console.log(`${pname} resigned in ${game}`);
+                console.log(`${pname} resigned in ${room}`);
                 sendMsg({
                     sender: '',
                     text: `${pname} resigned`
@@ -324,7 +457,7 @@ function gameActionHandler(socket: TTCSocket) {
 
                 if(state.ended) return;
 
-                console.log(`${pname} offered draw in ${game}`);
+                console.log(`${pname} offered draw in ${room}`);
 
                 if(state.drawOffer) {
                     if(state.drawOffer === pname) return;
@@ -345,7 +478,7 @@ function gameActionHandler(socket: TTCSocket) {
                     text: `${pname} offered a draw`
                 });
 
-                io.to(game).emit("game_event", {
+                io.to(room).emit("game_event", {
                     kind: "DrawOffered",
                     player: pname
                 } as TaggedAction);
@@ -359,7 +492,7 @@ function gameActionHandler(socket: TTCSocket) {
                 if(!state.drawOffer ||
                     state.drawOffer === pname) return;
 
-                console.log(`${pname} accepted draw in ${game}`);
+                console.log(`${pname} accepted draw in ${room}`);
                 sendMsg({
                     sender: '',
                     text: `${pname} accepted a draw`
@@ -376,7 +509,7 @@ function gameActionHandler(socket: TTCSocket) {
                 if(!state.drawOffer ||
                     state.drawOffer === pname) return;
 
-                console.log(`${pname} declined draw in ${game}`);
+                console.log(`${pname} declined draw in ${room}`);
 
                 sendMsg({
                     sender: '',
@@ -393,7 +526,7 @@ function gameActionHandler(socket: TTCSocket) {
 
                 if(!state.game.canClaimDraw()) return;
 
-                console.log(`${pname} claimed draw in ${game}`);
+                console.log(`${pname} claimed draw in ${room}`);
 
                 sendMsg({
                     sender: '',
@@ -408,7 +541,7 @@ function gameActionHandler(socket: TTCSocket) {
 
                 if(!state.ended) return;
 
-                console.log(`${pname} exited game ${game}`);
+                console.log(`${pname} exited game ${room}`);
                 
                 state.rematch = "never";
 
@@ -424,7 +557,7 @@ function gameActionHandler(socket: TTCSocket) {
 
                 if(!state.ended) return;
 
-                console.log(`${pname} requested rematch in ${game}`);
+                console.log(`${pname} requested rematch in ${room}`);
 
                 if(state.rematch) {
                     if(state.rematch === pname ||
@@ -437,7 +570,15 @@ function gameActionHandler(socket: TTCSocket) {
 
                     state.rematch = "";
 
-                    newGame(sockets.get(state.black), sockets.get(state.white));
+                    newGame(sockets.get(state.black), sockets.get(state.white), {
+                            white: state.clockInfo.black,
+                            black: state.clockInfo.white,
+                            timeleft: [
+                                state.clockInfo.black.base,
+                                state.clockInfo.white.base
+                            ],
+                            timestamp: Date.now()
+                        });
 
                     return;
                 }
